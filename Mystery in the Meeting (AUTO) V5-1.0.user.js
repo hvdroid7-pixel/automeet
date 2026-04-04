@@ -210,58 +210,60 @@
         input.dispatchEvent(new KeyboardEvent('keyup',   { key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true }));
     }
 
+    function clickWhisperChannel(playerName) {
+        const boxes = Array.from(document.querySelectorAll('.chat-box-type'));
+        const match = boxes.find(box => {
+            const ns = box.querySelector('.chat-box-type-name');
+            return ns && norm(ns.textContent) === norm(playerName);
+        });
+        if (!match) return false;
+        match.dispatchEvent(new MouseEvent('mousedown', { bubbles:true }));
+        match.dispatchEvent(new MouseEvent('mouseup',   { bubbles:true }));
+        match.dispatchEvent(new MouseEvent('click',     { bubbles:true }));
+        return true;
+    }
+
     function doWhisper(playerName, message, cb) {
         const { input, btn } = getIO();
         if (!input) { setTimeout(() => cb && cb(), 400); return; }
+        const safeTarget = (playerName || '').trim();
+        const safeMessage = String(message ?? '').trim();
+        if (!safeTarget || !safeMessage) { setTimeout(() => cb && cb(), 120); return; }
 
-        // Paso 1: abrir canal whisper con /w nombre (método clásico)
-        input.value = `/w ${playerName}`;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        simEnter(input);
+        let attempts = 0;
+        const maxAttempts = 4;
 
-        // Fix del primer turno: esperar a que exista canal whisper antes de enviar
-        waitForWhisperChannel(playerName).then((isReady) => {
-            if (!isReady) {
-                input.value = `/w ${playerName}`;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                simEnter(input);
-            }
-            // Paso 2: enviar mensaje en el canal whisper activo
-            input.value = message;
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            if (btn) btn.click(); else simEnter(input);
+        const openAndSend = () => {
+            attempts++;
+            // 1) Abrir whisper al jugador con el sistema original
+            setNativeValue(input, `/w ${safeTarget}`);
+            simEnter(input);
 
-            setTimeout(() => {
-                // Paso 3: restaurar chat de party con doble click al canal anterior
-                let clicked = false;
-
-                document.querySelectorAll('.chat-box-type').forEach(box => {
-                    const ns = box.querySelector('.chat-box-type-name');
-                    if (!ns) return;
-
-                    const t = ns.textContent.replace(/[\u200B\uFEFF]/g, '').trim();
-                    if (norm(t).toLowerCase() === norm(playerName).toLowerCase()) {
-                        box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                        box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                        box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        setTimeout(() => {
-                            box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                            box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                            box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        }, 10);
-                        clicked = true;
-                    }
-                });
-
-                if (!clicked) {
-                    input.value = '/p';
-                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                    simEnter(input);
+            // 2) Esperar a que el canal exista y seleccionarlo explícitamente
+            waitForWhisperChannel(safeTarget, 1600).then((isReady) => {
+                if (!isReady) {
+                    if (attempts < maxAttempts) { setTimeout(openAndSend, 220); return; }
+                    setTimeout(() => cb && cb(), 120);
+                    return;
                 }
 
-                setTimeout(() => cb && cb(), 150);
-            }, 120);
-        });
+                const selected = clickWhisperChannel(safeTarget);
+                if (!selected) {
+                    if (attempts < maxAttempts) { setTimeout(openAndSend, 180); return; }
+                    setTimeout(() => cb && cb(), 120);
+                    return;
+                }
+
+                // 3) Pequeña espera para evitar carrera del primer turno
+                setTimeout(() => {
+                    setNativeValue(input, safeMessage);
+                    if (btn) btn.click(); else simEnter(input);
+                    setTimeout(() => cb && cb(), 170);
+                }, 140);
+            });
+        };
+
+        openAndSend();
     }
 
     /* ═══════════════════════════════════════════════════════════
@@ -357,16 +359,27 @@
     }
 
     let lastPartyDescText = '';
-    async function updatePartyDescription() {
-        const phaseLabel = GAME.phase === 'night' ? `🌙 Noche ${GAME.nightNum}` : `☀ Día ${GAME.dayNum}`;
-        const players = GAME.players.map(p => {
-            const st = p.status === 'dead' ? '🪦' : (p.tired ? '💤' : '💓');
-            const roleInfo = (p.roleRevealed && p.role) ? ` ${p.role.emoji}${p.role.name}` : '';
-            return `${p.name} (${st})${roleInfo}`;
-        }).join('\n');
+    async function updatePartyDescription(force = false) {
+        const phaseLabel = `Día ${GAME.dayNum} / Noche ${GAME.nightNum}`;
+        const aliveLines = GAME.players
+            .filter(p => p.status === 'alive')
+            .map(p => {
+                const st = p.tired ? '💤' : '💗';
+                const roleInfo = (p.roleRevealed && p.role) ? ` [${p.role.emoji}${p.role.name}]` : '';
+                return `(${st}) ${p.name}${roleInfo}`;
+            }).join('\n');
+        const deadLines = GAME.players
+            .filter(p => p.status === 'dead')
+            .map(p => {
+                const roleInfo = p.role ? ` [${p.role.emoji}${p.role.name}]` : '';
+                return `(🪦) ${p.name}${roleInfo}`;
+            }).join('\n');
         const descriptionText = [
-            'Lista de jugadores:',
-            players || '—',
+            '► Jugadores vivos:',
+            aliveLines || '—',
+            '',
+            '► Jugadores muertos:',
+            deadLines || '—',
             '',
             phaseLabel,
             '',
@@ -375,7 +388,7 @@
             '✦ YouTube:',
             'youtube.com/@dotcleo',
         ].join('\n');
-        if (descriptionText === lastPartyDescText) return true;
+        if (!force && descriptionText === lastPartyDescText) return true;
 
         const leaderBtn =
             document.querySelector('ui-button.party-list-options[title="You are party leader"] button') ||
@@ -469,6 +482,12 @@
     function killPlayer(name, cause) {
         const p = getP(name);
         if (!p || p.status==='dead') return;
+        if (p.role?.name === 'Espectro') {
+            p.roleRevealed = true;
+            pub(`👻 ¡${name} es el Espectro! No puede morir y permanece en juego.`);
+            schedulePartyDescriptionUpdate();
+            return;
+        }
 
         // Amuleto embrujado: revive como Inocente
         const amuleto = (GAME.items[name]||[]).find(it=>it.id==='amuleto');
@@ -668,6 +687,15 @@
         GAME.pendingTurns=[]; GAME.turnsAttended=0; GAME.totalTurns=0; GAME.hexedRole=null;
         GAME.turnWindowClosed = new Set();
         GAME.ghostVotingEnabled = false;
+
+        if (GAME.nightNum === 1) {
+            const evilAlive = alive().filter(p => p.role.team === 'malos');
+            evilAlive.forEach(ep => {
+                const mates = evilAlive.filter(x => x.name !== ep.name).map(x => x.name);
+                const mateMsg = mates.length ? mates.join(', ') : 'ninguno';
+                w(ep.name, `☠️ Compañeros malvados: ${mateMsg}. No puedes votar para matar a tus compañeros.`);
+            });
+        }
 
         // Curandero: noche 5
         if (GAME.nightNum===5) {
@@ -930,7 +958,7 @@
     function startVotingPhase() {
         GAME.phase='voting'; GAME.voteTally={}; GAME.votesMade={}; GAME.pendingTurns=[]; GAME.totalTurns=0; GAME.turnsAttended=0; GAME.mostVoted=null; GAME.skipVotes=new Set();
         GAME.turnWindowClosed = new Set();
-        GAME.votingDeadline = Date.now() + VOTING_DURATION;
+        GAME.votingDeadline = null;
 
         // Enviar turnos de Espectro y Juez ANTES de que comience la votación pública
         const alv=alive();
@@ -945,8 +973,9 @@
             GAME.pendingTurns.push({id:`${p.name}_pre_v${GAME.dayNum}`, playerName:p.name, role:p.role.name, responded:false});
         });
 
-        // Esperar a que respondan (o pausar 15s) antes de anunciar la votación
-        const preVotingWait = GAME.pendingTurns.length > 0 ? 15_000 : 500;
+        // Esperar a que respondan (o pausar 20s) antes de anunciar la votación
+        const preVotingWait = GAME.pendingTurns.length > 0 ? 20_000 : 20_000;
+        pub('🗞️ La fase de votación iniciará en 20 segundos. Todos diríjanse a la mesa de votación.');
         pause(preVotingWait);
 
         setTimeout(() => {
@@ -954,11 +983,10 @@
             GAME.pendingTurns.forEach(t=>{ if(!t.responded) t.responded=true; });
             GAME.pendingTurns=[]; GAME.totalTurns=0; GAME.turnsAttended=0;
 
-            pub('✧ ¡Es hora de votar! 🗞'); pause(500);
-            pub('🔔'); pause(500);
-            pub('¡La fase de votación comienza! 🗞'); pause(300);
+            pub('🔔 La votación ha comenzado. Tienen 60 segundos.'); pause(300);
             pub('► Usa !votar [jugador] para votar · !v [jugador] · !skip para votar SKIP.');
             pub('► También puedes usar !skip para votar SKIP.');
+            GAME.votingDeadline = Date.now() + VOTING_DURATION;
             setTimeout(resolveVoting, VOTING_DURATION);
         }, preVotingWait);
     }
@@ -1020,7 +1048,7 @@
         const leaders = Object.entries(tally).filter(([,c])=>c===max && c>0).map(([n])=>n);
         GAME.voteLeaders = leaders;
         GAME.mostVoted = leaders.length===1 ? leaders[0] : null;
-        pub('🔔'); pause(500);
+        pub('La votación ha terminado. 🔔'); pause(500);
         pub(buildVoteCountLine());
         if (!leaders.length) pub('✧ No se emitieron votos. Nadie será ejecutado.');
         else if (leaders.includes('_skip')) pub('✧ SKIP fue el más votado. Nadie será ejecutado.');
@@ -1032,10 +1060,11 @@
 
     function sendVotingRoleTurns() {
         const alv=alive();
+        const canExecute = !!(GAME.mostVoted && GAME.mostVoted !== '_skip' && !!getP(GAME.mostVoted));
         alv.filter(p=>p.role.turn==='votacion').forEach(p => {
             const rs=GAME.roleState[p.name];
-            if (p.role.name==='Secuaz' && (!GAME.mostVoted||rs.used)) return;
-            if (p.role.name==='Juez'   && (!GAME.mostVoted||rs.cancelUsed)) return;
+            if (p.role.name==='Secuaz' && (!canExecute||rs.used)) return;
+            if (p.role.name==='Juez'   && (!canExecute||rs.cancelUsed)) return;
             if (p.role.name==='Espectro') return;
             w(p.name, buildTurnMsg(p));
             GAME.pendingTurns.push({id:`${p.name}_v${GAME.dayNum}`, playerName:p.name, role:p.role.name, responded:false});
@@ -1049,7 +1078,6 @@
         if (GAME.phase!=='voting') return;
         GAME.pendingTurns.forEach(t=>{t.responded=true;});
         if (GAME.voteLeaders?.includes('_skip') || (GAME.voteLeaders && GAME.voteLeaders.length>1)) {
-            pub(buildVoteCountLine());
             pub('✧ No habrá ejecución en esta ronda.');
             GAME.mostVoted=null;
         } else if (GAME.mostVoted) {
@@ -1066,7 +1094,6 @@
                 if (ep) { ep.roleRevealed=true; schedulePartyDescriptionUpdate(); pause(500); pub(`✧ ${GAME.mostVoted} era: ${ep.role.emoji} ${ep.role.name} (${ep.role.team==='buenos'?'🛡️ Bueno':ep.role.team==='malos'?'☠️ Malvado':'👤 Solitario'})`); }
             }
         } else { pub('✧ Ningún jugador ha sido ejecutado hoy.'); }
-        pub(buildVoteCountLine());
         if (checkWinCondition()) return;
         GAME.frozenPlayer=null; GAME.controlledVote=null;
         // 10 segundos de pausa antes de las tareas (para que los jugadores vean el rol revelado)
@@ -1140,6 +1167,7 @@
                 delete GAME.pendingConfs[senderName];
                 target.player.roleRevealed=true;
                 pub(`📢 ¡El Megáfono de ${senderName} revela que ${target.player.name} es ${target.player.role?.emoji} ${target.player.role?.name}!`);
+                schedulePartyDescriptionUpdate();
                 return;
             }
             // Sugerencia de nombre estándar
@@ -1373,6 +1401,7 @@
         if (!abilityCheck.ok) { w(player.name, abilityCheck.reason); return; }
         const res=findAlive(text,player.name);
         if (!res) { w(player.name,'⚠ Jugador no encontrado. Escribe solo el nombre.'); return; }
+        if (res.player.role.team === 'malos') { w(player.name,'⚠ No puedes votar para matar a un compañero malvado.'); return; }
         if (!res.exact) { suggest(player.name,res.player.name,()=>processEvilVote(player,res.player.name)); return; }
         GAME.evilVotes[player.name]=res.player.name;
         w(player.name,`✔ Has votado por ${res.player.name}.`);
@@ -1478,6 +1507,8 @@
         const turn=GAME.pendingTurns.find(t=>t.playerName===player.name&&!t.responded);
         if (!turn) return;
         const isPreVotingTurn = turn.id.includes('_pre_v');
+        const abilityCheck = canUseAbility(player);
+        if (!abilityCheck.ok) { w(player.name, abilityCheck.reason); markAttended(turn.id); return; }
 
         switch(role) {
             case 'Secuaz': {
@@ -1652,6 +1683,14 @@
         const st = p.status==='alive' ? (p.tired?'💤':'💗') : '🪦';
         const roleStr = (p.status==='dead'||p.roleRevealed) && p.role ? `${p.role.emoji} ${p.role.name}` : '?';
         pub(`【${p.name}】 Estado: ${st} || Rol: ${roleStr}`);
+    }
+
+    function cmdRefreshDesc(senderName) {
+        requireAdmin(senderName, () => {
+            updatePartyDescription(true)
+                .then(ok => pub(ok ? '✔ Descripción actualizada.' : '⚠ No pude actualizar la descripción ahora mismo.'))
+                .catch(() => pub('⚠ Ocurrió un error al refrescar la descripción.'));
+        });
     }
 
     function cmdDar(adminName, itemNum, targetName) {
@@ -1944,6 +1983,7 @@
                 if (msgL==='!data')     { cmdData(playerName); return; }
                 if (msgL==='!vivos')    { cmdVivos(); return; }
                 if (msgL==='!muertos')  { cmdMuertos(); return; }
+                if (msgL==='!refreshdesc') { cmdRefreshDesc(playerName); return; }
                 if (msgL==='!energyall'||msgL==='!ea') { cmdEnergyAll(playerName); return; }
                 if (msgL==='!reset')    { requireAdmin(playerName, ()=>{ clearAllTimers(); GAME=mkGame(); pub('✔ Partida reiniciada.'); }); return; }
                 if (msgL==='!expandir') { cmdExpandir(); return; }
@@ -1997,6 +2037,7 @@
                 if (msgL.startsWith('!login '))             { cmdLogin(senderName, rawMsg.split(/\s+/)[1]); return; }
                 if (msgL.startsWith('!logout'))              { cmdLogout(senderName); return; }
                 if (msgL==='!data')                          { cmdData(senderName); return; }
+                if (msgL==='!refreshdesc')                   { cmdRefreshDesc(senderName); return; }
                 if (msgL==='!sintareas'&&GAME.phase==='tasks') { finishTasksPhase(); return; }
 
                 // ── FILTRO 3: solo jugadores activos de la partida pueden responder turnos ──
