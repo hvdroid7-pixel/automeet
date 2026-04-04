@@ -247,11 +247,45 @@
                     return;
                 }
 
-                const selected = clickWhisperChannel(safeTarget);
-                if (!selected) {
-                    if (attempts < maxAttempts) { setTimeout(openAndSend, 180); return; }
-                    setTimeout(() => cb && cb(), 120);
-                    return;
+        // Paso 1: abrir canal whisper con /w nombre (método clásico)
+        setNativeValue(input, `/w ${playerName}`);
+        simEnter(input);
+
+        // Fix del primer turno: esperar a que exista canal whisper antes de enviar
+        waitForWhisperChannel(playerName).then((isReady) => {
+            if (!isReady) {
+                setNativeValue(input, `/w ${playerName}`);
+                simEnter(input);
+            }
+            // Paso 2: enviar mensaje en el canal whisper activo
+            setNativeValue(input, message);
+            if (btn) btn.click(); else simEnter(input);
+
+            setTimeout(() => {
+                // Paso 3: restaurar chat de party con doble click al canal anterior
+                let clicked = false;
+
+                document.querySelectorAll('.chat-box-type').forEach(box => {
+                    const ns = box.querySelector('.chat-box-type-name');
+                    if (!ns) return;
+
+                    const t = ns.textContent.replace(/[\u200B\uFEFF]/g, '').trim();
+                    if (norm(t).toLowerCase() === norm(playerName).toLowerCase()) {
+                        box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        setTimeout(() => {
+                            box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                            box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                            box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        }, 10);
+                        clicked = true;
+                    }
+                });
+
+                if (!clicked) {
+                    setNativeValue(input, '/p');
+                    simEnter(input);
                 }
 
                 // 3) Pequeña espera para evitar carrera del primer turno
@@ -359,8 +393,8 @@
     }
 
     let lastPartyDescText = '';
-    async function updatePartyDescription(force = false) {
-        const phaseLabel = `Día ${GAME.dayNum} / Noche ${GAME.nightNum}`;
+    async function updatePartyDescription() {
+        const phaseLabel = GAME.phase === 'night' ? `🌙 Noche ${GAME.nightNum}` : `☀ Día ${GAME.dayNum}`;
         const aliveLines = GAME.players
             .filter(p => p.status === 'alive')
             .map(p => {
