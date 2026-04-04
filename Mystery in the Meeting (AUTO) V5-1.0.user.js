@@ -210,9 +210,42 @@
         input.dispatchEvent(new KeyboardEvent('keyup',   { key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true }));
     }
 
+    function clickWhisperChannel(playerName) {
+        const boxes = Array.from(document.querySelectorAll('.chat-box-type'));
+        const match = boxes.find(box => {
+            const ns = box.querySelector('.chat-box-type-name');
+            return ns && norm(ns.textContent) === norm(playerName);
+        });
+        if (!match) return false;
+        match.dispatchEvent(new MouseEvent('mousedown', { bubbles:true }));
+        match.dispatchEvent(new MouseEvent('mouseup',   { bubbles:true }));
+        match.dispatchEvent(new MouseEvent('click',     { bubbles:true }));
+        return true;
+    }
+
     function doWhisper(playerName, message, cb) {
         const { input, btn } = getIO();
         if (!input) { setTimeout(() => cb && cb(), 400); return; }
+        const safeTarget = (playerName || '').trim();
+        const safeMessage = String(message ?? '').trim();
+        if (!safeTarget || !safeMessage) { setTimeout(() => cb && cb(), 120); return; }
+
+        let attempts = 0;
+        const maxAttempts = 4;
+
+        const openAndSend = () => {
+            attempts++;
+            // 1) Abrir whisper al jugador con el sistema original
+            setNativeValue(input, `/w ${safeTarget}`);
+            simEnter(input);
+
+            // 2) Esperar a que el canal exista y seleccionarlo explícitamente
+            waitForWhisperChannel(safeTarget, 1600).then((isReady) => {
+                if (!isReady) {
+                    if (attempts < maxAttempts) { setTimeout(openAndSend, 220); return; }
+                    setTimeout(() => cb && cb(), 120);
+                    return;
+                }
 
         // Paso 1: abrir canal whisper con /w nombre (método clásico)
         setNativeValue(input, `/w ${playerName}`);
@@ -255,9 +288,16 @@
                     simEnter(input);
                 }
 
-                setTimeout(() => cb && cb(), 150);
-            }, 120);
-        });
+                // 3) Pequeña espera para evitar carrera del primer turno
+                setTimeout(() => {
+                    setNativeValue(input, safeMessage);
+                    if (btn) btn.click(); else simEnter(input);
+                    setTimeout(() => cb && cb(), 170);
+                }, 140);
+            });
+        };
+
+        openAndSend();
     }
 
     /* ═══════════════════════════════════════════════════════════
@@ -359,28 +399,21 @@
             .filter(p => p.status === 'alive')
             .map(p => {
                 const st = p.tired ? '💤' : '💗';
-                const roleInfo = (p.roleRevealed && p.role) ? ` ${p.role.emoji}${p.role.name}` : '';
-                return `${p.name} (${st})${roleInfo}`;
+                const roleInfo = (p.roleRevealed && p.role) ? ` [${p.role.emoji}${p.role.name}]` : '';
+                return `(${st}) ${p.name}${roleInfo}`;
             }).join('\n');
         const deadLines = GAME.players
             .filter(p => p.status === 'dead')
             .map(p => {
-                const roleInfo = p.role ? ` ${p.role.emoji}${p.role.name}` : '';
-                return `${p.name} (🪦)${roleInfo}`;
+                const roleInfo = p.role ? ` [${p.role.emoji}${p.role.name}]` : '';
+                return `(🪦) ${p.name}${roleInfo}`;
             }).join('\n');
-        const revealed = GAME.players
-            .filter(p => p.roleRevealed && p.role)
-            .map(p => `${p.name}: ${p.role.emoji}${p.role.name}`)
-            .join('\n');
         const descriptionText = [
-            'Jugadores vivos:',
+            '► Jugadores vivos:',
             aliveLines || '—',
             '',
-            'Jugadores muertos:',
+            '► Jugadores muertos:',
             deadLines || '—',
-            '',
-            'Roles revelados:',
-            revealed || '—',
             '',
             phaseLabel,
             '',
@@ -389,7 +422,7 @@
             '✦ YouTube:',
             'youtube.com/@dotcleo',
         ].join('\n');
-        if (descriptionText === lastPartyDescText) return true;
+        if (!force && descriptionText === lastPartyDescText) return true;
 
         const leaderBtn =
             document.querySelector('ui-button.party-list-options[title="You are party leader"] button') ||
@@ -1686,6 +1719,14 @@
         pub(`【${p.name}】 Estado: ${st} || Rol: ${roleStr}`);
     }
 
+    function cmdRefreshDesc(senderName) {
+        requireAdmin(senderName, () => {
+            updatePartyDescription(true)
+                .then(ok => pub(ok ? '✔ Descripción actualizada.' : '⚠ No pude actualizar la descripción ahora mismo.'))
+                .catch(() => pub('⚠ Ocurrió un error al refrescar la descripción.'));
+        });
+    }
+
     function cmdDar(adminName, itemNum, targetName) {
         requireAdmin(adminName, () => {
             if (!itemNum || !targetName) { pub('⚠ Uso: !dar [número] [jugador]'); return; }
@@ -1976,6 +2017,7 @@
                 if (msgL==='!data')     { cmdData(playerName); return; }
                 if (msgL==='!vivos')    { cmdVivos(); return; }
                 if (msgL==='!muertos')  { cmdMuertos(); return; }
+                if (msgL==='!refreshdesc') { cmdRefreshDesc(playerName); return; }
                 if (msgL==='!energyall'||msgL==='!ea') { cmdEnergyAll(playerName); return; }
                 if (msgL==='!reset')    { requireAdmin(playerName, ()=>{ clearAllTimers(); GAME=mkGame(); pub('✔ Partida reiniciada.'); }); return; }
                 if (msgL==='!expandir') { cmdExpandir(); return; }
@@ -2029,6 +2071,7 @@
                 if (msgL.startsWith('!login '))             { cmdLogin(senderName, rawMsg.split(/\s+/)[1]); return; }
                 if (msgL.startsWith('!logout'))              { cmdLogout(senderName); return; }
                 if (msgL==='!data')                          { cmdData(senderName); return; }
+                if (msgL==='!refreshdesc')                   { cmdRefreshDesc(senderName); return; }
                 if (msgL==='!sintareas'&&GAME.phase==='tasks') { finishTasksPhase(); return; }
 
                 // ── FILTRO 3: solo jugadores activos de la partida pueden responder turnos ──
