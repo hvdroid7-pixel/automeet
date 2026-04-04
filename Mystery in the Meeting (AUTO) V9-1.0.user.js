@@ -22,6 +22,8 @@
     const TURN_TIMEOUT      = 60_000;
     const VOTING_DURATION   = 60_000;
     const TASKS_DURATION    = 10 * 60_000;
+    const TASKS_WARNING_AT  = 5 * 60_000;
+    const TASKS_TO_NIGHT_DELAY = 2 * 60_000;
     const NAME_REGEX        = /^[a-zA-Z0-9_.\-]+$/;
 
     const SK = { accounts: 'mitm_auto_accounts', sessions: 'mitm_auto_sessions' };
@@ -141,6 +143,8 @@
             items:          {},     // { playerName: [{ id, name, emoji, ... }] }
             lobbyTimer:     null,
             taskTimer:      null,
+            taskWarnTimer:  null,
+            nextNightTimer: null,
             turnTimeoutTimer:null,
             turnWindowClosed:new Set(),
             ghostVotingEnabled:false,
@@ -210,19 +214,55 @@
         input.dispatchEvent(new KeyboardEvent('keyup',   { key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true }));
     }
 
+    function getChatTabsByName(playerName) {
+        return Array.from(document.querySelectorAll('.chat-box-type'))
+            .filter(box => norm(box.querySelector('.chat-box-type-name')?.textContent) === norm(playerName));
+    }
+
+    function clickChatTab(box) {
+        if (!box) return;
+        box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    }
+
+    function isWhisperContextReady(playerName) {
+        const activeTab = document.querySelector('.chat-box-type.active, .chat-box-type.selected');
+        if (activeTab) {
+            const activeName = norm(activeTab.querySelector('.chat-box-type-name')?.textContent || '');
+            if (activeName === norm(playerName)) return true;
+        }
+        const input = getIO().input;
+        const ph = norm(input?.getAttribute('placeholder') || '');
+        return ph.includes(norm(playerName)) && ph.includes('whisper');
+    }
+
+    async function ensureWhisperReady(playerName, attempts = 3) {
+        for (let i = 0; i < attempts; i++) {
+            openChat();
+            const { input } = getIO();
+            if (!input) { await new Promise(r => setTimeout(r, 180)); continue; }
+            setNativeValue(input, `/w ${playerName}`);
+            simEnter(input);
+            const channelCreated = await waitForWhisperChannel(playerName, 1500);
+            if (!channelCreated) continue;
+            const tabs = getChatTabsByName(playerName);
+            if (tabs[0]) clickChatTab(tabs[0]);
+            await new Promise(r => setTimeout(r, 120));
+            if (isWhisperContextReady(playerName) || getChatTabsByName(playerName).length > 0) return true;
+        }
+        return false;
+    }
+
     function doWhisper(playerName, message, cb) {
         const { input, btn } = getIO();
         if (!input) { setTimeout(() => cb && cb(), 400); return; }
 
-        // Paso 1: abrir canal whisper con /w nombre (método clásico)
-        setNativeValue(input, `/w ${playerName}`);
-        simEnter(input);
-
-        // Fix del primer turno: esperar a que exista canal whisper antes de enviar
-        waitForWhisperChannel(playerName).then((isReady) => {
+        ensureWhisperReady(playerName).then((isReady) => {
             if (!isReady) {
-                setNativeValue(input, `/w ${playerName}`);
-                simEnter(input);
+                pub(`⚠ No se pudo abrir Whisper con ${playerName}. Mensaje retenido para evitar chat público.`);
+                setTimeout(() => cb && cb(), 120);
+                return;
             }
             // Paso 2: enviar mensaje en el canal whisper activo
             setNativeValue(input, message);
@@ -232,22 +272,10 @@
                 // Paso 3: restaurar chat de party con doble click al canal anterior
                 let clicked = false;
 
-                document.querySelectorAll('.chat-box-type').forEach(box => {
-                    const ns = box.querySelector('.chat-box-type-name');
-                    if (!ns) return;
-
-                    const t = ns.textContent.replace(/[\u200B\uFEFF]/g, '').trim();
-                    if (norm(t).toLowerCase() === norm(playerName).toLowerCase()) {
-                        box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                        box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                        box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        setTimeout(() => {
-                            box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                            box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                            box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        }, 10);
-                        clicked = true;
-                    }
+                getChatTabsByName(playerName).forEach(box => {
+                    clickChatTab(box);
+                    setTimeout(() => clickChatTab(box), 10);
+                    clicked = true;
                 });
 
                 if (!clicked) {
@@ -353,40 +381,42 @@
     }
 
     let lastPartyDescText = '';
+    function uniquePlayersByName(players) {
+        const seen = new Set();
+        return players.filter(p => {
+            const key = norm(p.name);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }
+
     async function updatePartyDescription() {
-        const phaseLabel = GAME.phase === 'night' ? `🌙 Noche ${GAME.nightNum}` : `☀ Día ${GAME.dayNum}`;
-        const aliveLines = GAME.players
-            .filter(p => p.status === 'alive')
+        const aliveLines = uniquePlayersByName(GAME.players.filter(p => p.status === 'alive'))
             .map(p => {
                 const st = p.tired ? '💤' : '💗';
-                const roleInfo = (p.roleRevealed && p.role) ? ` ${p.role.emoji}${p.role.name}` : '';
-                return `${p.name} (${st})${roleInfo}`;
+                const roleInfo = (p.roleRevealed && p.role) ? ` [${p.role.emoji} ${p.role.name}]` : '';
+                return `(${st}) ${p.name}${roleInfo}`;
             }).join('\n');
-        const deadLines = GAME.players
-            .filter(p => p.status === 'dead')
+        const deadLines = uniquePlayersByName(GAME.players.filter(p => p.status === 'dead'))
             .map(p => {
-                const roleInfo = p.role ? ` ${p.role.emoji}${p.role.name}` : '';
-                return `${p.name} (🪦)${roleInfo}`;
+                const roleInfo = p.role ? ` [${p.role.emoji} ${p.role.name}]` : '';
+                return `(🪦) ${p.name}${roleInfo}`;
             }).join('\n');
-        const revealed = GAME.players
-            .filter(p => p.roleRevealed && p.role)
-            .map(p => `${p.name}: ${p.role.emoji}${p.role.name}`)
-            .join('\n');
+        const phaseTag = `<Día ${GAME.dayNum} / Noche ${GAME.nightNum}>`;
         const descriptionText = [
-            'Jugadores vivos:',
+            '► Jugadores vivos:',
             aliveLines || '—',
             '',
-            'Jugadores muertos:',
+            '► Jugadores muertos:',
             deadLines || '—',
             '',
-            'Roles revelados:',
-            revealed || '—',
+            phaseTag,
             '',
-            phaseLabel,
-            '',
-            '► Discord:',
+            '► Info host:',
+            'Discord:',
             'https://discord.gg/wX8mJxCJFq',
-            '✦ YouTube:',
+            'YouTube:',
             'youtube.com/@dotcleo',
         ].join('\n');
         if (descriptionText === lastPartyDescText) return true;
@@ -468,6 +498,10 @@
         msg = msg.replace('{lastSpy}',  rs.lastSpy || 'nadie');
         msg = msg.replace('{mostVoted}',GAME.mostVoted || 'ninguno');
         return msg;
+    }
+
+    function buildTurnWhisperText(turnNumber, msg) {
+        return `——— ✦ Turno N.º ${turnNumber} ———\n${msg}`;
     }
 
     function buildRoleMsg(player) {
@@ -616,6 +650,8 @@
     function clearAllTimers() {
         clearInterval(GAME.lobbyTimer);
         clearTimeout(GAME.taskTimer);
+        clearTimeout(GAME.taskWarnTimer);
+        clearTimeout(GAME.nextNightTimer);
         clearTimeout(GAME.turnTimeoutTimer);
     }
 
@@ -671,6 +707,27 @@
             GAME.roleState[p.name] = initRoleState(p.role.name);
         });
         GAME.players.forEach(p => w(p.name, buildRoleMsg(p)));
+        const introLines = [
+            '︶︶︶︶ ❕ ︶︶︶︶',
+            '✧ ¡Hola! Soy Dot y seré su anfitrión en Mystery in the Meeting.',
+            'Aquí deberán descubrir al equipo malvado escondido entre la reunión.',
+            'Cada rol tiene herramientas únicas: úsenlas con estrategia para sobrevivir.',
+            '︶︶︶︶ ❕ ︶︶︶︶',
+            '✧ El juego tiene 3 fases:',
+            '1) Fase nocturna 🌙: duermen y usan habilidades secretas.',
+            '2) Fase diurna ☀: se reúnen, analizan pistas y debaten.',
+            '3) Fase de votación 🗳️: deciden a quién expulsar de la reunión.',
+            '︶︶︶︶ ❕ ︶︶︶︶',
+            '✧ Todas las habilidades se usan por Whisper.',
+            'Tu rol es privado: no lo reveles si quieres mantener ventaja.',
+            '︶︶︶︶ ❕ ︶︶︶︶',
+            '✧ Perlas y Mystery Shop:',
+            'Las perlas son la moneda del juego para comprar objetos útiles.',
+            'Se consiguen haciendo tareas (hasta 8 disponibles, 1-2 perlas por tarea).',
+            'Trabajar consume energía: si quedas cansado, no podrás usar habilidad ese turno.',
+            '︶︶︶︶ ❕ ︶︶︶︶',
+        ];
+        introLines.forEach(line => pub(line));
         pause(500);
         pub('✧ Todos los roles han sido otorgados.');
         pause(600);
@@ -731,6 +788,7 @@
     function sendNightTurns() {
         const alv = alive();
         const indRoles = ['Cupido','Curandero','Chef','Detective','Guardaespaldas','Justiciero','Médico','Melómano','Espía','Pirómano'];
+        let turnNum = 1;
         alv.forEach(p => {
             if (!indRoles.includes(p.role.name)) return;
             const rs = GAME.roleState[p.name];
@@ -748,7 +806,7 @@
                 GAME.turnsAttended++;
                 return;
             }
-            w(p.name, buildTurnMsg(p));
+            w(p.name, buildTurnWhisperText(turnNum++, buildTurnMsg(p)));
             GAME.pendingTurns.push({id:`${p.name}_n${GAME.nightNum}`, playerName:p.name, role:p.role.name, responded:false});
         });
 
@@ -757,7 +815,7 @@
         if (evilAlive.length>0) {
             evilAlive.forEach(ep => {
                 const baseMsg = ep.role.name==='Asesino' ? buildTurnMsg(ep) : '【🎃】 Malvados, voten por el jugador al cual quieran matar esta noche (solo el nombre) ...';
-                w(ep.name, baseMsg);
+                w(ep.name, buildTurnWhisperText(turnNum++, baseMsg));
             });
             GAME.pendingTurns.push({id:`malvados_n${GAME.nightNum}`, playerName:'malvados', role:'Malvados', responded:false, votes:0, needed:evilAlive.length});
         }
@@ -919,6 +977,7 @@
         if (GAME.phase!=='day') return;
         pub('► Enviando turnos diurnos (☀) al Whisper...'); pause(1200);
         const alv=alive(), dayTurnTypes=['diurno','multiturno'];
+        let turnNum = 1;
         alv.forEach(p => {
             if (!dayTurnTypes.includes(p.role.turn)) return;
             const rs=GAME.roleState[p.name];
@@ -935,7 +994,7 @@
                 GAME.turnsAttended++;
                 return;
             }
-            w(p.name, buildTurnMsg(p));
+            w(p.name, buildTurnWhisperText(turnNum++, buildTurnMsg(p)));
             GAME.pendingTurns.push({id:`${p.name}_d${GAME.dayNum}`, playerName:p.name, role:p.role.name, responded:false});
         });
         GAME.totalTurns=GAME.pendingTurns.length;
@@ -970,7 +1029,7 @@
             const msg = p.role.name==='Espectro'
                 ? '【👻】 Espectro, antes de que comience la votación: ¿deseas "provocar" el fenómeno hoy (los muertos votan) o "guardar" tu habilidad? ...'
                 : '【🏳】 Juez(a), antes de que comience la votación: ¿deseas "revelar" tu identidad ahora (tu voto valdrá doble) o "esperar"? ...';
-            w(p.name, msg);
+            w(p.name, buildTurnWhisperText(1, msg));
             GAME.pendingTurns.push({id:`${p.name}_pre_v${GAME.dayNum}`, playerName:p.name, role:p.role.name, responded:false});
         });
 
@@ -1061,13 +1120,14 @@
 
     function sendVotingRoleTurns() {
         const alv=alive();
+        let turnNum = 1;
         const canExecute = !!(GAME.mostVoted && GAME.mostVoted !== '_skip' && !!getP(GAME.mostVoted));
         alv.filter(p=>p.role.turn==='votacion').forEach(p => {
             const rs=GAME.roleState[p.name];
             if (p.role.name==='Secuaz' && (!canExecute||rs.used)) return;
             if (p.role.name==='Juez'   && (!canExecute||rs.cancelUsed)) return;
             if (p.role.name==='Espectro') return;
-            w(p.name, buildTurnMsg(p));
+            w(p.name, buildTurnWhisperText(turnNum++, buildTurnMsg(p)));
             GAME.pendingTurns.push({id:`${p.name}_v${GAME.dayNum}`, playerName:p.name, role:p.role.name, responded:false});
         });
         GAME.totalTurns=GAME.pendingTurns.length;
@@ -1111,15 +1171,24 @@
         pub('✧ ¡Las tareas se han abierto! 📚'); pause(500);
         pub('✦ Tienen 10 minutos para completar sus tareas.');
         schedulePartyDescriptionUpdate();
+        GAME.taskWarnTimer = setTimeout(() => {
+            if (GAME.phase==='tasks') pub('Quedan 5 minutos para terminar las tareas. 📚');
+        }, TASKS_WARNING_AT);
         GAME.taskTimer=setTimeout(() => { if (GAME.phase==='tasks') finishTasksPhase(); }, TASKS_DURATION); // Tarea inicia aquí, la fase ya es 'tasks'
     }
 
     function finishTasksPhase() {
         clearTimeout(GAME.taskTimer);
+        clearTimeout(GAME.taskWarnTimer);
         if (GAME.phase!=='tasks') return;
         GAME.players.forEach(p=>{p.tired=false;});
+        pub('🔔 La fase de tareas ha terminado.');
+        pause(300);
+        pub('🌙 La fase nocturna comenzará en 2 minutos. Regresen a casa.');
         schedulePartyDescriptionUpdate();
-        startNightPhase();
+        GAME.nextNightTimer = setTimeout(() => {
+            if (GAME.phase==='tasks') startNightPhase();
+        }, TASKS_TO_NIGHT_DELAY);
     }
 
     /* ═══════════════════════════════════════════════════════════
@@ -1728,6 +1797,12 @@
         pub('► Usa !jugar para unirte a la partida.');
     }
 
+    function cmdRefreshDesc() {
+        updatePartyDescription()
+            .then(ok => pub(ok ? '✔ Descripción actualizada.' : '⚠ No pude actualizar la descripción ahora mismo.'))
+            .catch(() => pub('⚠ Error al reconstruir la descripción.'));
+    }
+
     function cmdKick(targetName) {
         if (!targetName) { pub('⚠ Uso: !kick [nombre del jugador]'); return; }
         const res = findPlayer(targetName, GAME.players);
@@ -1979,6 +2054,7 @@
                 if (msgL==='!energyall'||msgL==='!ea') { cmdEnergyAll(playerName); return; }
                 if (msgL==='!reset')    { requireAdmin(playerName, ()=>{ clearAllTimers(); GAME=mkGame(); pub('✔ Partida reiniciada.'); }); return; }
                 if (msgL==='!expandir') { cmdExpandir(); return; }
+                if (msgL==='!refreshdesc') { cmdRefreshDesc(); return; }
                 if (msgL.startsWith('!kick ')    ||msgL.startsWith('!eliminar ')) { requireAdmin(playerName,()=>cmdKick(parts.slice(1).join(' '))); return; }
                 if (msgL.startsWith('!admin '))  { cmdAdminAssign(playerName, parts.slice(1).join(' ')); return; }
                 if (msgL.startsWith('!ver '))    { cmdVer(parts.slice(1).join(' ')); return; }
