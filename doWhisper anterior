@@ -1,0 +1,53 @@
+function doWhisper(playerName, message, cb) {
+        const { input, btn } = getIO();
+        if (!input) { setTimeout(() => cb && cb(), 400); return; }
+
+        // Paso 1: abrir canal whisper con /w nombre (método clásico)
+        input.value = `/w ${playerName}`;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        simEnter(input);
+
+        // Fix del primer turno: esperar a que exista canal whisper antes de enviar
+        waitForWhisperChannel(playerName).then((isReady) => {
+            if (!isReady) {
+                input.value = `/w ${playerName}`;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                simEnter(input);
+            }
+            // Paso 2: enviar mensaje en el canal whisper activo
+            input.value = message;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            if (btn) btn.click(); else simEnter(input);
+
+            setTimeout(() => {
+                // Paso 3: restaurar chat de party con doble click al canal anterior
+                let clicked = false;
+
+                document.querySelectorAll('.chat-box-type').forEach(box => {
+                    const ns = box.querySelector('.chat-box-type-name');
+                    if (!ns) return;
+
+                    const t = ns.textContent.replace(/[\u200B\uFEFF]/g, '').trim();
+                    if (norm(t).toLowerCase() === norm(playerName).toLowerCase()) {
+                        box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        setTimeout(() => {
+                            box.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                            box.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                            box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        }, 10);
+                        clicked = true;
+                    }
+                });
+
+                if (!clicked) {
+                    input.value = '/p';
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    simEnter(input);
+                }
+
+                setTimeout(() => cb && cb(), 150);
+            }, 120);
+        });
+    }
