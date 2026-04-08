@@ -255,32 +255,50 @@
     }
 
     function doWhisper(playerName, message, cb) {
-        const { input, btn } = getIO();
+        const { input } = getIO();
         if (!input) { setTimeout(() => cb && cb(), 400); return; }
 
-        ensureWhisperReady(playerName).then((isReady) => {
+        setNativeValue(input, `/w ${playerName}`);
+        simEnter(input);
+
+        waitForWhisperChannel(playerName).then((isReady) => {
             if (!isReady) {
                 pub(`⚠ No se pudo abrir Whisper con ${playerName}. Mensaje retenido para evitar chat público.`);
                 setTimeout(() => cb && cb(), 120);
                 return;
             }
+
+            const activeInput = getIO().input;
+            const activeBtn = getIO().btn;
+            if (!activeInput) { setTimeout(() => cb && cb(), 250); return; }
+
             // Paso 2: enviar mensaje en el canal whisper activo
-            setNativeValue(input, message);
-            if (btn) btn.click(); else simEnter(input);
+            setNativeValue(activeInput, message);
+            if (activeBtn) activeBtn.click(); else simEnter(activeInput);
 
             setTimeout(() => {
                 // Paso 3: restaurar chat de party con doble click al canal anterior
                 let clicked = false;
 
-                getChatTabsByName(playerName).forEach(box => {
+                document.querySelectorAll('.chat-box-type').forEach(box => {
+                    const ns = box.querySelector('.chat-box-type-name');
+                    if (!ns) return;
+                    const t = ns.textContent.replace(/[\u200B\uFEFF]/g, '').trim();
+                    if (norm(t) !== norm(playerName)) return;
                     clickChatTab(box);
                     setTimeout(() => clickChatTab(box), 10);
                     clicked = true;
                 });
 
                 if (!clicked) {
-                    setNativeValue(input, '/p');
-                    simEnter(input);
+                    setNativeValue(activeInput, '/p');
+                    simEnter(activeInput);
+                } else {
+                    const activeName = norm(document.querySelector('.chat-box-type.active .chat-box-type-name')?.textContent || '');
+                    if (activeName === norm(playerName)) {
+                        setNativeValue(activeInput, '/p');
+                        simEnter(activeInput);
+                    }
                 }
 
                 setTimeout(() => cb && cb(), 150);
