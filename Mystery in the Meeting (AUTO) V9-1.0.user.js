@@ -226,6 +226,34 @@
         box.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     }
 
+    function isWhisperContextReady(playerName) {
+        const activeTab = document.querySelector('.chat-box-type.active, .chat-box-type.selected');
+        if (activeTab) {
+            const activeName = norm(activeTab.querySelector('.chat-box-type-name')?.textContent || '');
+            if (activeName === norm(playerName)) return true;
+        }
+        const input = getIO().input;
+        const ph = norm(input?.getAttribute('placeholder') || '');
+        return ph.includes(norm(playerName)) && ph.includes('whisper');
+    }
+
+    async function ensureWhisperReady(playerName, attempts = 3) {
+        for (let i = 0; i < attempts; i++) {
+            openChat();
+            const { input } = getIO();
+            if (!input) { await new Promise(r => setTimeout(r, 180)); continue; }
+            setNativeValue(input, `/w ${playerName}`);
+            simEnter(input);
+            const channelCreated = await waitForWhisperChannel(playerName, 1500);
+            if (!channelCreated) continue;
+            const tabs = getChatTabsByName(playerName);
+            if (tabs[0]) clickChatTab(tabs[0]);
+            await new Promise(r => setTimeout(r, 120));
+            if (isWhisperContextReady(playerName) || getChatTabsByName(playerName).length > 0) return true;
+        }
+        return false;
+    }
+
     function doWhisper(playerName, message, cb) {
         const { input } = getIO();
         if (!input) { setTimeout(() => cb && cb(), 400); return; }
@@ -235,8 +263,9 @@
 
         waitForWhisperChannel(playerName).then((isReady) => {
             if (!isReady) {
-                setNativeValue(input, `/w ${playerName}`);
-                simEnter(input);
+                pub(`⚠ No se pudo abrir Whisper con ${playerName}. Mensaje retenido para evitar chat público.`);
+                setTimeout(() => cb && cb(), 120);
+                return;
             }
 
             const activeInput = getIO().input;
